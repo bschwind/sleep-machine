@@ -1,4 +1,6 @@
-# RP2040 Template
+# sleep-machine
+
+An RP2040-based project for generating brown noise for sleeping.
 
 ## Dependencies
 
