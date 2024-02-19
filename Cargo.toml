@@ -7,6 +7,9 @@ edition = "2021"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "0.2"
+fugit = "0.3"
 panic-reset = "0.1"
+rand = { version = "0.8", default-features = false }
 rp2040-boot2 = "0.3"
 rp2040-hal = { version = "0.9", features = ["critical-section-impl"] }
+rp2040-i2s = { git = "https://github.com/bschwind/rp2040-i2s.git", branch = "main" }
