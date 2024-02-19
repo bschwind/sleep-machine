@@ -2,7 +2,11 @@
 #![no_std]
 
 use crate::clocks::set_system_clock_exact;
+use biquad::{
+    Biquad, Coefficients, DirectForm1, DirectForm2Transposed, ToHertz, Type, Q_BUTTERWORTH_F32,
+};
 use cortex_m::singleton;
+use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
 use fugit::RateExtU32;
 use panic_reset as _;
 use rand::Rng;
@@ -49,12 +53,15 @@ fn main() -> ! {
     let pins =
         rp2040_hal::gpio::Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut pac.RESETS);
 
+    let mut led_pin = pins.gpio25.into_push_pull_output();
+    led_pin.set_low().unwrap();
+
     // PIO Globals
     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
     // I2S output
     let dac_output = I2SOutput::new(&mut pio0, sm0, pins.gpio6, pins.gpio7, pins.gpio8).unwrap();
-    let (_dac_sm, _dac_fifo_rx, dac_fifo_tx) = dac_output.split();
+    let (dac_sm, _dac_fifo_rx, dac_fifo_tx) = dac_output.split();
 
     // Start double-buffered DMA output to the DAC
     let dma_buf_1 = singleton!(: [u32; PIO_DMA_BUF_SIZE] = [0; PIO_DMA_BUF_SIZE]).unwrap();
@@ -65,21 +72,48 @@ fn main() -> ! {
     let transfer_config =
         rp2040_hal::dma::double_buffer::Config::new((dma.ch0, dma.ch1), dma_buf_1, dac_fifo_tx);
 
-    let tx_transfer = transfer_config.start();
-    let mut tx_transfer = tx_transfer.read_next(dma_buf_2);
-
     // Random noise generator
     let mut rnd = RingOscillator::new(pac.ROSC).initialize();
+
+    // Low pass filter
+    let sample_freq = 48_000.0.hz();
+    let cutoff_freq = 200.0.hz();
+
+    let coeffs = Coefficients::<f32>::from_params(
+        Type::LowPass,
+        sample_freq,
+        cutoff_freq,
+        Q_BUTTERWORTH_F32,
+    )
+    .unwrap();
+
+    let mut low_pass_filter = DirectForm1::<f32>::new(coeffs);
+
+    // Start the DMA transfer and PIO state machine.
+    let tx_transfer = transfer_config.start();
+    let mut tx_transfer = tx_transfer.read_next(dma_buf_2);
+    dac_sm.start();
+
+    led_pin.set_high().unwrap();
 
     loop {
         if tx_transfer.is_done() {
             let (tx_buf, next_tx_transfer) = tx_transfer.wait();
 
             // Write our next samples to tx_buf
-            for sample in tx_buf.iter_mut() {
-                let y: f32 = (rnd.gen::<f32>() * 2.0) - 1.0;
-                let signed_sample = (y * 2_147_483_648.0) as i32;
-                *sample = signed_sample as u32;
+            for sample in tx_buf.chunks_mut(2) {
+                // Random value between -1.0 and 1.0
+                let white_noise: f32 = (rnd.gen::<f32>() * 2.0) - 1.0;
+
+                // Apply low-pass filter
+                let filtered = low_pass_filter.run(white_noise);
+
+                // Convert to i32
+                let signed_sample = (filtered * 2_147_483_648.0) as i32;
+
+                // Reinterpret as u32
+                sample[0] = signed_sample as u32;
+                sample[1] = signed_sample as u32;
             }
 
             tx_transfer = next_tx_transfer.read_next(tx_buf);
