@@ -2,16 +2,14 @@
 #![no_std]
 
 use crate::clocks::set_system_clock_exact;
-use biquad::{
-    Biquad, Coefficients, DirectForm1, DirectForm2Transposed, ToHertz, Type, Q_BUTTERWORTH_F32,
-};
+use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Type};
 use cortex_m::singleton;
-use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
+use embedded_hal::digital::v2::OutputPin;
 use fugit::RateExtU32;
 use panic_reset as _;
 use rand::Rng;
-use rp2040_hal::{dma::DMAExt, pac, pio::PIOExt, rosc::RingOscillator, Watchdog};
-use rp2040_i2s::I2SOutput;
+use rp2040_hal::{dma::DMAExt, pac, pio::PIOExt, rosc::RingOscillator, Clock, Watchdog};
+use rp2040_i2s::{I2SOutput, PioClockDivider};
 
 mod clocks;
 
@@ -36,8 +34,8 @@ fn main() -> ! {
 
     // Start Clocks
     // Found with: https://github.com/bschwind/rp2040-clock-calculator
-    let desired_system_clock = 61440000.Hz();
-    let _clocks = set_system_clock_exact(
+    let desired_system_clock = 132000000.Hz();
+    let clocks = set_system_clock_exact(
         desired_system_clock,
         pac.XOSC,
         pac.CLOCKS,
@@ -60,7 +58,15 @@ fn main() -> ! {
     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
     // I2S output
-    let dac_output = I2SOutput::new(&mut pio0, sm0, pins.gpio6, pins.gpio7, pins.gpio8).unwrap();
+    let dac_output = I2SOutput::new(
+        &mut pio0,
+        PioClockDivider::FromSystemClock(clocks.system_clock.freq()),
+        sm0,
+        pins.gpio6,
+        pins.gpio7,
+        pins.gpio8,
+    )
+    .unwrap();
     let (dac_sm, _dac_fifo_rx, dac_fifo_tx) = dac_output.split();
 
     // Start double-buffered DMA output to the DAC
@@ -77,46 +83,42 @@ fn main() -> ! {
 
     // Low pass filter
     let sample_freq = 48_000.0.hz();
-    let cutoff_freq = 200.0.hz();
+    let cutoff_freq = 700.0.hz();
 
-    let coeffs = Coefficients::<f32>::from_params(
-        Type::LowPass,
-        sample_freq,
-        cutoff_freq,
-        Q_BUTTERWORTH_F32,
-    )
-    .unwrap();
+    let coeffs =
+        Coefficients::<f32>::from_params(Type::LowPass, sample_freq, cutoff_freq, 0.3).unwrap();
 
-    let mut low_pass_filter = DirectForm1::<f32>::new(coeffs);
+    let mut low_pass_filter = DirectForm2Transposed::<f32>::new(coeffs);
 
     // Start the DMA transfer and PIO state machine.
     let tx_transfer = transfer_config.start();
     let mut tx_transfer = tx_transfer.read_next(dma_buf_2);
-    dac_sm.start();
-
-    led_pin.set_high().unwrap();
+    let dac_sm = dac_sm.start();
 
     loop {
-        if tx_transfer.is_done() {
-            let (tx_buf, next_tx_transfer) = tx_transfer.wait();
-
-            // Write our next samples to tx_buf
-            for sample in tx_buf.chunks_mut(2) {
-                // Random value between -1.0 and 1.0
-                let white_noise: f32 = (rnd.gen::<f32>() * 2.0) - 1.0;
-
-                // Apply low-pass filter
-                let filtered = low_pass_filter.run(white_noise);
-
-                // Convert to i32
-                let signed_sample = (filtered * 2_147_483_648.0) as i32;
-
-                // Reinterpret as u32
-                sample[0] = signed_sample as u32;
-                sample[1] = signed_sample as u32;
-            }
-
-            tx_transfer = next_tx_transfer.read_next(tx_buf);
+        if dac_sm.stalled() {
+            led_pin.set_high().unwrap();
         }
+
+        let (tx_buf, next_tx_transfer) = tx_transfer.wait();
+
+        // Write our next samples to tx_buf
+        for sample in tx_buf.chunks_mut(2) {
+            // Random value between -1.0 and 1.0
+            let white_noise: f32 = (rnd.gen::<f32>() * 2.0) - 1.0;
+
+            // Apply low-pass filter
+            let filtered = low_pass_filter.run(white_noise * 0.7);
+            // let filtered = white_noise * 1.00;
+
+            // Convert to i32
+            let signed_sample = (filtered * i32::MAX as f32) as i32;
+
+            // Reinterpret as u32
+            sample[0] = signed_sample as u32;
+            sample[1] = signed_sample as u32;
+        }
+
+        tx_transfer = next_tx_transfer.read_next(tx_buf);
     }
 }
