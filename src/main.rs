@@ -34,7 +34,7 @@ fn main() -> ! {
 
     // Start Clocks
     // Found with: https://github.com/bschwind/rp2040-clock-calculator
-    let desired_system_clock = 132000000.Hz();
+    let desired_system_clock = 153600000.Hz();
     let clocks = set_system_clock_exact(
         desired_system_clock,
         pac.XOSC,
